@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# antigravity-region-fix — простой Bash-интерфейс к agy_region_fix.py
+#
+#   ./agy-region-fix status
+#   ./agy-region-fix patch
+#   ./agy-region-fix verify
+#   ./agy-region-fix test
+#   ./agy-region-fix restore
+#
+# Дополнительные аргументы передаются Python-скрипту как есть:
+#   ./agy-region-fix --path /opt/agy patch
+#   ./agy-region-fix --dry-run patch
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PY="${PYTHON:-python3}"
+
+if ! command -v "$PY" >/dev/null 2>&1; then
+    echo "ERROR: python3 не найден" >&2
+    exit 2
+fi
+
+# Модуль ищется рядом с launcher'ом (запуск из репозитория) или в libdir
+# после `make install`.
+MOD=""
+for cand in \
+    "$HERE/agy_region_fix.py" \
+    "$HERE/../lib/antigravity-region-fix/agy_region_fix.py" \
+    "/usr/local/lib/antigravity-region-fix/agy_region_fix.py"
+do
+    if [ -f "$cand" ]; then
+        MOD="$cand"
+        break
+    fi
+done
+
+if [ -z "$MOD" ]; then
+    echo "ERROR: agy_region_fix.py не найден (искал рядом с $HERE и в ../lib)" >&2
+    echo "Запустите 'make install' или запускайте launcher из каталога проекта." >&2
+    exit 2
+fi
+
+exec "$PY" "$MOD" "$@"
