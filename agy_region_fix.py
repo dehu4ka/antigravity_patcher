@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 TOOL = "antigravity-region-fix"
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 MANIFEST_SCHEMA = 1
 
 # --------------------------------------------------------------------------
@@ -905,10 +905,7 @@ def verify_backup_is_original(backup: Path, meta: dict) -> None:
             raise PatchError("резервная копия уже содержит патч (%s): %s" % (st.gate.key, backup))
 
 
-MAC_LIBVAL_ENT = "com.apple.security.cs.disable-library-validation"
 SIGN_BAK_SUFFIX = ".agysignbak"
-CS_REQUIRE_LV = 0x2000
-CS_RUNTIME = 0x10000
 
 
 def _codesign() -> Optional[str]:
@@ -1025,101 +1022,6 @@ def restore_bundle_signature(app: Path) -> bool:
     return True
 
 
-def _signing_info(main: Path) -> Tuple[int, Dict[str, object]]:
-    flags = 0
-    entitlements: Dict[str, object] = {}
-    cs = _codesign()
-    if not cs:
-        return flags, entitlements
-
-    proc = _cs([cs, "-d", "--verbose=4", str(main)])
-    match = re.search(rb"flags=0x([0-9a-fA-F]+)", proc.stdout)
-    if match:
-        flags = int(match.group(1), 16)
-
-    proc = _cs([cs, "-d", "--entitlements", ":-", str(main)])
-    blob = proc.stdout
-    match = re.search(rb"<\?xml.*?</plist>", blob, re.DOTALL)
-    if match:
-        try:
-            import plistlib
-            loaded = plistlib.loads(match.group(0))
-            if isinstance(loaded, dict):
-                entitlements = loaded
-        except Exception:  # noqa: BLE001 - чужая подпись, разбор не критичен
-            entitlements = {}
-    return flags, entitlements
-
-
-def preflight_library_validation(app: Path, allow: bool) -> Optional[Dict[str, object]]:
-    """Проверяет, запустится ли приложение после ad-hoc подписи.
-
-    Electron-приложения Google подписаны с Hardened Runtime и Library
-    Validation. Ad-hoc подпись меняет Team ID, и тогда динамические
-    библиотеки отклоняются системой. Лечится только entitlement
-    com.apple.security.cs.disable-library-validation.
-    """
-    main = _bundle_main_executable(app)
-    if main is None or not _codesign():
-        return None
-    flags, entitlements = _signing_info(main)
-    if not (flags & (CS_REQUIRE_LV | CS_RUNTIME)):
-        return None
-    if MAC_LIBVAL_ENT in entitlements:
-        return None
-    if not allow:
-        raise PatchError(
-            "приложение подписано с Hardened Runtime/Library Validation.\n"
-            "После ad-hoc подписи оно не запустится: система отклонит загрузку\n"
-            "вложенных библиотек. Повторите с флагом\n"
-            "  --macos-disable-library-validation\n"
-            "Патчер добавит entitlement %s\n"
-            "только главному исполняемому файлу бандла." % MAC_LIBVAL_ENT
-        )
-    merged = dict(entitlements)
-    merged[MAC_LIBVAL_ENT] = True
-    return merged
-
-
-def _write_entitlements(entitlements: Dict[str, object], directory: Path) -> Path:
-    import plistlib
-    fd, name = tempfile.mkstemp(prefix=".agy-ent-", suffix=".plist", dir=str(directory))
-    with os.fdopen(fd, "wb") as fh:
-        plistlib.dump(entitlements, fh)
-    return Path(name)
-
-
-def _sign_one(target: Path, entitlements_file: Optional[Path] = None) -> None:
-    cs = _codesign()
-    if not cs:
-        raise PatchError("codesign не найден")
-    cmd = [cs, "--force", "--sign", "-", "--timestamp=none"]
-    if entitlements_file is None:
-        cmd.append("--preserve-metadata=identifier,entitlements,flags,runtime")
-    else:
-        cmd.append("--preserve-metadata=identifier,flags,runtime")
-        cmd.extend(["--entitlements", str(entitlements_file)])
-    cmd.append(str(target))
-    proc = _cs(cmd)
-    if proc.returncode != 0:
-        raise PatchError("codesign не смог подписать %s: %s" % (target, _last_line(proc.stdout)))
-
-
-def _nested_code(app: Path) -> List[Path]:
-    out: List[Path] = []
-    frameworks = app / "Contents" / "Frameworks"
-    if frameworks.is_dir():
-        for path in sorted(frameworks.iterdir()):
-            if path.is_dir() and (path / "Contents" / "Info.plist").is_file():
-                out.append(path)
-            elif path.is_file() and path.suffix in (".dylib", ".so"):
-                out.append(path)
-    library = app / "Contents" / "Library"
-    if library.is_dir():
-        out.extend(sorted(library.rglob("*.app")))
-    return out
-
-
 def _strip_quarantine(target: Path) -> None:
     xattr = shutil.which("xattr")
     if not xattr or sys.platform != "darwin":
@@ -1130,44 +1032,45 @@ def _strip_quarantine(target: Path) -> None:
 def macos_sign(path: Path, app: Optional[Path], allow_libval: bool) -> bool:
     """Переподписывает изменённый Mach-O и, если нужно, весь .app.
 
-    Порядок — изнутри наружу: вложенный код, затем цель, затем бандл.
-    Так печать CodeResources собирается уже по новым хэшам.
+    Для бандла подпись делается равномерно ad-hoc с --options=0. Это снимает
+    Hardened Runtime, а вместе с ним Library Validation у всех процессов,
+    включая Helper'ы. Иначе Helper'ы сохраняют подпись Google со своим Team ID
+    и отказываются загружать ad-hoc Electron Framework — приложение падает на
+    старте с «mapping process and mapped file (non-platform) have different
+    Team IDs». Entitlement disable-library-validation только главному файлу
+    этой проблемы не решает.
     """
     cs = _codesign()
     if not cs:
         if sys.platform == "darwin":
             raise PatchError("codesign не найден: macOS не запустит изменённый файл")
         warn("Mach-O изменён вне macOS: подпись нужно обновить на Mac "
-             "(codesign --force --sign - <путь>)")
+             "(codesign --force --deep --sign - --options=0 <путь>)")
         return False
 
-    entitlements = preflight_library_validation(app, allow_libval) if app else None
-    ent_file: Optional[Path] = None
-    try:
-        if entitlements:
-            ent_file = _write_entitlements(entitlements, app.parent)
+    if allow_libval:
+        warn("--macos-disable-library-validation больше не требуется: "
+             "бандл подписывается без Hardened Runtime")
 
-        for nested in _nested_code(app) if app else []:
-            _sign_one(nested)
-        _sign_one(path)
-        if app:
-            _sign_one(app, ent_file)
-            proc = _cs([cs, "--verify", "--deep", "--strict", str(app)])
-            if proc.returncode != 0:
-                raise PatchError("проверка подписи бандла не прошла: %s" % _last_line(proc.stdout))
-        else:
-            proc = _cs([cs, "--verify", "--strict", str(path)])
-            if proc.returncode != 0:
-                raise PatchError("проверка подписи не прошла: %s" % _last_line(proc.stdout))
-    finally:
-        if ent_file is not None:
-            try:
-                ent_file.unlink()
-            except OSError:
-                pass
+    if app:
+        proc = _cs([cs, "--force", "--deep", "--sign", "-", "--options=0", str(app)])
+    else:
+        proc = _cs([cs, "--force", "--sign", "-", "--timestamp=none",
+                    "--preserve-metadata=identifier,entitlements,flags,runtime", str(path)])
+    if proc.returncode != 0:
+        raise PatchError("codesign не смог подписать %s: %s" %
+                         (app or path, _last_line(proc.stdout)))
+
+    verify = [cs, "--verify", "--strict"]
+    if app:
+        verify.insert(2, "--deep")
+    proc = _cs(verify + [str(app or path)])
+    if proc.returncode != 0:
+        raise PatchError("проверка подписи не прошла: %s" % _last_line(proc.stdout))
 
     _strip_quarantine(app or path)
-    ok("подпись обновлена (ad-hoc): %s" % (app or path))
+    ok("подпись обновлена (ad-hoc%s): %s" %
+       (", без Hardened Runtime" if app else "", app or path))
     return True
 
 
@@ -1228,7 +1131,6 @@ def patch_one(path: Path, args: argparse.Namespace) -> int:
     allow_libval = bool(getattr(args, "macos_disable_library_validation", False))
     snap: Optional[Path] = None
     if is_macho and not no_resign and sys.platform == "darwin" and app:
-        preflight_library_validation(app, allow_libval)
         snap = snapshot_bundle_signature(app)
 
     mode = os.stat(path).st_mode & 0o7777
@@ -1683,8 +1585,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-resign", action="store_true",
                    help="не переподписывать Mach-O (macOS) после патча")
     p.add_argument("--macos-disable-library-validation", action="store_true",
-                   help="разрешить добавить entitlement disable-library-validation "
-                        "главному бинарнику .app (нужно для Electron/Hardened Runtime)")
+                   help="устарело: бандл подписывается без Hardened Runtime, "
+                        "флаг принимается для совместимости")
     p.add_argument("--version", action="version", version="%s %s" % (TOOL, TOOL_VERSION))
 
     sub = p.add_subparsers(dest="command", required=True)

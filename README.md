@@ -230,28 +230,38 @@ Silicon ядро не запускает неподписанный код. По
    `Contents/_CodeSignature/*`, `Contents/CodeResources` + манифест с sha256.
    `restore` возвращает их вместе с оригинальными байтами, поэтому приложение
    остаётся с подписью Google.
-2. **Preflight Library Validation.** Если главный бинарник подписан с
-   Hardened Runtime (`flags` содержат `0x10000`/`0x2000`), ad-hoc подпись
-   сломает загрузку вложенных библиотек и приложение не стартует. В этом
-   случае патчер **отказывается** писать, пока не передан
-   `--macos-disable-library-validation`; тогда entitlement
-   `com.apple.security.cs.disable-library-validation` добавляется только
-   главному исполняемому файлу бандла (не framework'ам).
-3. **Подпись изнутри наружу**: вложенные `Frameworks`/`Library`, затем
-   изменённый бинарник, затем сам бандл — с
-   `--preserve-metadata=identifier,entitlements,flags,runtime`, ad-hoc
-   (`--sign -`) и без `--timestamp`.
+2. **Почему нельзя подписывать только изменённый файл.** Electron-приложение
+   состоит из Helper'ов (`Contents/Frameworks/* Helper.app`), подписанных
+   Google со своим Team ID и Hardened Runtime. Если изменённый
+   `language_server` подписать ad-hoc, а Helper'ы оставить как есть, то при
+   загрузке `Electron Framework.framework` ядро убьёт каждый Helper с
+   «mapping process and mapped file (non-platform) have different Team IDs»,
+   и приложение упадёт на старте. Entitlement
+   `disable-library-validation`, добавленный только главному файлу, Helper'ам
+   не помогает.
+3. **Равномерная переподпись.** Поэтому для `.app` патчер выполняет
+   `codesign --force --deep --sign - --options=0 <App>`: весь бандл, включая
+   Helper'ы, подписывается ad-hoc, а `--options=0` снимает Hardened Runtime и
+   вместе с ним Library Validation у всех процессов. После этого фреймворк
+   грузится независимо от Team ID.
 4. **Проверка** `codesign --verify --deep --strict`; при ошибке патчер
    откатывает байты и подпись из бэкапа.
 5. **Quarantine** снимается (`xattr -dr com.apple.quarantine`), иначе
    Gatekeeper может заблокировать запуск.
 
-Для standalone CLI (вне `.app`) подписывается только сам бинарник. Отключить
-всё это можно флагом `--no-resign`, тогда подпись придётся обновить вручную:
+Для standalone CLI (вне `.app`) подписывается только сам бинарник, с
+сохранением метаданных. Отключить подпись можно флагом `--no-resign`, тогда
+обновить её придётся вручную:
 
 ```bash
+# CLI
 codesign --force --sign - --timestamp=none ~/.local/bin/agy
+# приложение (если запускали с --no-resign)
+codesign --force --deep --sign - --options=0 /Applications/Antigravity.app
 ```
+
+Флаг `--macos-disable-library-validation` сохранён для совместимости, но
+больше не нужен.
 
 Цена: нотаризация Google после патча больше не действует — система не
 подтверждает, что код пришёл от Google. Это неизбежно при изменении
@@ -417,7 +427,7 @@ tail -40 ~/.gemini/antigravity-cli/log/cli-*.log
 | Приложение показывает Welcome, хотя `agy` работает | не пропатчен `language_server` | `./agy-region-fix --app patch` |
 | macOS: «Operation not permitted» / «не удаётся сохранить файл» | нет разрешения **Управление приложениями** | выдать Terminal доступ в Privacy & Security → App Management; см. 3.1 |
 | macOS: «приложение повреждено» | подпись после правки | `restore`, затем `patch` с корректной подписью; см. 9.6 |
-| macOS: `patch` отказался из-за Library Validation | Hardened Runtime | `--macos-disable-library-validation`; см. 9.6 |
+| macOS: приложение падает на старте с «different Team IDs» | Helper'ы остались с подписью Google | подпишите весь бандл: `codesign --force --deep --sign - --options=0 <App>`; см. 9.6 |
 | macOS: `absent` для arm64 | другая сборка/контекст | пришлите `status` и `uname -m` |
 
 ### 9.2 Коды возврата и что они значат
@@ -532,12 +542,16 @@ xattr -l /Applications/Antigravity.app
   согласитесь на перезапуск терминала и повторите `--app patch`. Подробно —
   в разделе 3.1.
 
-* **`patch` отказался из-за Library Validation.** Главный бинарник подписан с
-  Hardened Runtime, ad-hoc подпись сломает загрузку вложенных библиотек.
-  Повторите с флагом (entitlement добавится только главному executable):
+* **Приложение падает на старте: «different Team IDs» / «Library not
+  loaded: @rpath/Electron Framework.framework».** Так бывает, если бандл
+  подписан частично: изменённый `language_server` — ad-hoc, Helper'ы —
+  с подписью Google. Нужна равномерная переподпись всего бандла без
+  Hardened Runtime (патчер 1.2.1 делает это сам):
 
   ```bash
-  ./agy-region-fix --app --macos-disable-library-validation patch
+  codesign --force --deep --sign - --options=0 /Applications/Antigravity.app
+  xattr -dr com.apple.quarantine /Applications/Antigravity.app
+  codesign --verify --deep --strict /Applications/Antigravity.app
   ```
 
 * **«Приложение повреждено» / не запускается.** Верните оригинал и подпись:

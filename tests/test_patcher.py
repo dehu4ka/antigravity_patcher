@@ -7,6 +7,7 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -284,6 +285,48 @@ class MacBundleTests(unittest.TestCase):
             payload.write_bytes(b"tampered")
             with self.assertRaises(fix.PatchError):
                 fix.restore_bundle_signature(app)
+
+
+
+
+class MacSignCommandTests(unittest.TestCase):
+    """Проверяет, какой командой codesign подписывается бандл.
+
+    На Linux сам codesign не вызывается, поэтому подменяем _cs и смотрим
+    аргументы. Главное: для .app должна быть равномерная ad-hoc подпись
+    с --deep и --options=0 (без Hardened Runtime), иначе Helper'ы падают
+    с "different Team IDs".
+    """
+
+    class _Proc:
+        returncode = 0
+        stdout = b""
+
+    def _run(self, app):
+        calls = []
+        target = Path("/tmp/Fake.app/Contents/Resources/bin/language_server") if app else Path("/tmp/agy")
+        with mock.patch.object(fix.sys, "platform", "darwin"), \
+             mock.patch.object(fix, "_codesign", return_value="/usr/bin/codesign"), \
+             mock.patch.object(fix, "_cs", side_effect=lambda cmd, **kw: (calls.append(cmd), self._Proc())[1]), \
+             mock.patch.object(fix, "_strip_quarantine", lambda t: None):
+            fix.macos_sign(target, app, False)
+        return calls
+
+    def test_bundle_uses_deep_without_runtime(self):
+        app = Path("/tmp/Fake.app")
+        calls = self._run(app)
+        sign = calls[0]
+        self.assertIn("--deep", sign)
+        self.assertIn("--options=0", sign)
+        self.assertIn(str(app), sign)
+        self.assertTrue(any("--verify" in c for c in calls[1:]))
+
+    def test_standalone_keeps_metadata(self):
+        calls = self._run(None)
+        sign = calls[0]
+        self.assertNotIn("--deep", sign)
+        self.assertNotIn("--options=0", sign)
+        self.assertTrue(any(a.startswith("--preserve-metadata") for a in sign))
 
 
 if __name__ == "__main__":
