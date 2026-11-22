@@ -193,6 +193,32 @@ cd ~/antigravity-region-fix      # или любой каталог, куда с
 `/opt/homebrew/bin/agy`. Приложение — `/Applications/Antigravity.app/Contents/Resources/bin/language_server`
 (и `~/Applications/...`), включается флагом `--app` или `--all`.
 
+**Разрешение macOS (обязательно для `.app`).** macOS не даёт терминалу менять
+файлы внутри чужих приложений — это защита TCC, а не права Unix. Пока
+разрешение не выдано, запись внутрь `Antigravity.app` физически невозможна
+(«Operation not permitted»), и никакой `sudo` этого не обходит.
+
+Перед первым `--app patch`:
+
+1. Меню Apple → **Системные настройки** → **Конфиденциальность и безопасность**
+   → прокрутить до **Управление приложениями** (App Management).
+2. Нажать **«+»** → **Программы** → **Утилиты** → **Terminal** (или iTerm) →
+   **Открыть**.
+3. Включить переключатель. macOS может предупредить, что терминал будет
+   закрыт, — согласиться (сеанс перезапустится).
+4. Открыть терминал заново и повторить `./agy-region-fix --app patch`.
+
+Проверить, что разрешение есть, можно так:
+
+```bash
+# должно пройти без "Operation not permitted"
+touch "/Applications/Antigravity.app/Contents/Resources/bin/.write-test" && \
+  rm "/Applications/Antigravity.app/Contents/Resources/bin/.write-test"
+```
+
+Для standalone CLI вне `.app` (например `~/.local/bin/agy`) это разрешение не
+требуется.
+
 **Подпись кода.** Правка байтов ломает исходную подпись Google, а на Apple
 Silicon ядро не запускает неподписанный код. Порядок, который применяет патчер
 (проверен по upstream RendeRR/QNIX-патчеру):
@@ -386,6 +412,7 @@ tail -40 ~/.gemini/antigravity-cli/log/cli-*.log
 | `context deadline exceeded` | сеть, DNS, IPv6 | см. 9.5 |
 | «You are not signed in» / просит войти | истекла сессия | войдите заново в `agy`; см. 9.4 |
 | Приложение показывает Welcome, хотя `agy` работает | не пропатчен `language_server` | `./agy-region-fix --app patch` |
+| macOS: «Operation not permitted» / «не удаётся сохранить файл» | нет разрешения **Управление приложениями** | выдать Terminal доступ в Privacy & Security → App Management; см. 3.1 |
 | macOS: «приложение повреждено» | подпись после правки | `restore`, затем `patch` с корректной подписью; см. 9.6 |
 | macOS: `patch` отказался из-за Library Validation | Hardened Runtime | `--macos-disable-library-validation`; см. 9.6 |
 | macOS: `absent` для arm64 | другая сборка/контекст | пришлите `status` и `uname -m` |
@@ -490,6 +517,13 @@ codesign --verify --deep --strict --verbose=2 /Applications/Antigravity.app
 spctl -a -vv /Applications/Antigravity.app
 xattr -l /Applications/Antigravity.app
 ```
+
+* **«Operation not permitted» при записи в `.app`.** Это TCC/App Management, а
+  не обычные права файла: `sudo` не помогает. Выдайте терминалу разрешение
+  «Управление приложениями» (Системные настройки → Конфиденциальность и
+  безопасность → App Management → «+» → Программы → Утилиты → Terminal),
+  согласитесь на перезапуск терминала и повторите `--app patch`. Подробно —
+  в разделе 3.1.
 
 * **`patch` отказался из-за Library Validation.** Главный бинарник подписан с
   Hardened Runtime, ad-hoc подпись сломает загрузку вложенных библиотек.

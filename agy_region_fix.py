@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 TOOL = "antigravity-region-fix"
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.1.1"
 MANIFEST_SCHEMA = 1
 
 # --------------------------------------------------------------------------
@@ -578,6 +578,30 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
                 tmp.unlink()
             except OSError:
                 pass
+
+
+def _macos_write_hint(path: Path, exc: OSError) -> str:
+    msg = "запись в %s не удалась: %s" % (path, exc)
+    if sys.platform == "darwin" and _find_app_bundle(path) is not None:
+        msg += (
+            "\nmacOS блокирует изменение файлов внутри чужих приложений "
+            "(TCC, «Управление приложениями»). sudo здесь не помогает.\n"
+            "Выдайте разрешение терминалу:\n"
+            "  Системные настройки → Конфиденциальность и безопасность → "
+            "Управление приложениями\n"
+            "  → «+» → Программы → Утилиты → Terminal → включить.\n"
+            "macOS может перезапустить терминал — откройте его снова и "
+            "повторите команду."
+        )
+    return msg
+
+
+def write_target(path: Path, data: bytes, mode: int) -> None:
+    """Запись в целевой файл с понятной подсказкой на macOS."""
+    try:
+        atomic_write(path, data, mode)
+    except PermissionError as exc:
+        raise PatchError(_macos_write_hint(path, exc)) from exc
 
 
 def is_binary_running(path: Path) -> List[int]:
@@ -1209,7 +1233,7 @@ def patch_one(path: Path, args: argparse.Namespace) -> int:
 
     mode = os.stat(path).st_mode & 0o7777
     try:
-        atomic_write(path, bytes(data), mode)
+        write_target(path, bytes(data), mode)
         written = path.read_bytes()
         if sha256_bytes(written) != new_digest:
             raise PatchError("после записи хэш не совпал с ожидаемым")
@@ -1222,7 +1246,11 @@ def patch_one(path: Path, args: argparse.Namespace) -> int:
             macos_sign(path, app, allow_libval)
     except Exception as exc:  # noqa: BLE001 - нужен гарантированный откат
         err("ошибка записи/подписи: %s — восстанавливаю оригинал" % exc)
-        atomic_write(path, insp.data, mode)
+        try:
+            write_target(path, insp.data, mode)
+        except PatchError as wexc:
+            err("восстановить оригинал не удалось: %s" % wexc)
+            raise exc
         if snap is not None and app is not None:
             try:
                 restore_bundle_signature(app)
@@ -1286,7 +1314,7 @@ def restore_one(path: Path, args: argparse.Namespace) -> int:
     ensure_writable(path)
     original = backup.read_bytes()
     mode = os.stat(path).st_mode & 0o7777 if path.exists() else 0o755
-    atomic_write(path, original, mode)
+    write_target(path, original, mode)
     if sha256_file(path) != target_digest:
         err("после восстановления хэш не совпал")
         return 1
