@@ -651,9 +651,10 @@ tail -50 ~/.gemini/antigravity-cli/log/cli-*.log
   [RendeRR/antigravity-patcher](https://github.com/RendeRR/antigravity-patcher)
   (MIT), который в свою очередь основан на
   [QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher).
-* Логика macOS-подписи (снапшот подписи бандла, preflight Library Validation,
-  подпись изнутри наружу, снятие quarantine) повторяет проверенный там подход;
-  реализация и все проверки — в этом проекте.
+* Логика macOS-подписи (снапшот подписи бандла, равномерная ad-hoc подпись
+  всего бандла с `--options=0`, снятие quarantine) сверена с отчётом о реальном
+  крэше `different Team IDs` на macOS 26 arm64; реализация и все проверки —
+  в этом проекте.
 * Официальное: [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli),
   [antigravity.google/docs](https://antigravity.google/docs/).
 * Версии, на которых сверены сигнатуры: CLI 1.5.13, 1.5.14 (Linux x86-64);
