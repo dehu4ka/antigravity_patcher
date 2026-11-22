@@ -323,7 +323,7 @@ iOS/macOS-специфика: `agy` для macOS ставится тем же у
 |---|---|---|
 | Оригинал | запуск приложения | экран «Welcome to Antigravity / Continue with Google», сессия не принимается |
 | Патч | `./agy-region-fix --app patch` | hub @ 0x770848a |
-| Запуск | приложение | «Hi Kirill», авторизация подхватилась сама |
+| Запуск | приложение | «Hi <имя>», авторизация подхватилась сама |
 | Модели | список моделей в UI | Gemini 3.8 Flash (High/Medium/Low), Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B |
 | Запрос 1 | «Reply with exactly OK» | `OK` |
 | Запрос 2 | «Compute 17*23…» | `391` |
@@ -371,7 +371,242 @@ antigravity_patcher/
 
 ---
 
-## 10. Источники и совместимость
+## 10. Если что-то не работает
+
+Начните с трёх команд — они объясняют большинство случаев:
+
+```bash
+cd ~/Проекты/antigravity-region-fix      # или каталог клона
+./agy-region-fix status
+agy --version; uname -m
+tail -40 ~/.gemini/antigravity-cli/log/cli-*.log
+```
+
+`status` показывает путь, версию, архитектуру, контейнер (elf/macho), sha256,
+состояние каждого гейта и наличие бэкапа.
+
+### 10.1 Быстрая таблица
+
+| Симптом | Причина | Решение |
+|---|---|---|
+| `agy: command not found` | другой PATH / не та установка | `which -a agy`, затем `./agy-region-fix --path /полный/путь/agy patch` |
+| `patch` вернул **2**, «ни одна сигнатура не найдена» | новая версия CLI с другим кодом | ничего не записано; пришлите `status` + `agy --version` + `uname -m` |
+| `patch` вернул **2**, «ambiguous/mixed» | остатки прошлого патча или нестандартная сборка | `./agy-region-fix restore`, затем `patch`; если повтор — переустановите `agy` |
+| `patch` вернул **3** | `agy` запущен | закройте CLI/IDE/приложение, повторите |
+| «нет прав на запись» | файл принадлежит root | `sudo ./agy-region-fix patch` или исправьте владельца |
+| Патч применён, но снова ошибка региона | пропатчен не тот файл | `which agy` и `./agy-region-fix status`; сверьте путь |
+| После обновления CLI всё сломалось | автообновление вернуло оригинал | `./agy-region-fix verify` → `patch` |
+| `400 FAILED_PRECONDITION`, «User location is not supported for the API use» | **серверный** отказ | локальным патчем не решается |
+| `403 PERMISSION_DENIED` | **серверные** права/регион аккаунта | локальным патчем не решается |
+| `429` / quota exceeded | лимиты тарифа | подождать/сменить модель |
+| `context deadline exceeded` | сеть, DNS, IPv6 | см. 10.5 |
+| «You are not signed in» / просит войти | истекла сессия | войдите заново в `agy`; см. 10.4 |
+| Приложение показывает Welcome, хотя `agy` работает | не пропатчен `language_server` | `./agy-region-fix --app patch` |
+| macOS: «приложение повреждено» | подпись после правки | `restore`, затем `patch` с корректной подписью; см. 10.6 |
+| macOS: `patch` отказался из-за Library Validation | Hardened Runtime | `--macos-disable-library-validation`; см. 10.6 |
+| macOS: `absent` для arm64 | другая сборка/контекст | пришлите `status` и `uname -m` |
+
+### 10.2 Коды возврата и что они значат
+
+| Код | Значение | Файл изменён? |
+|---|---|---|
+| `0` | успех (в т.ч. «уже пропатчено») | да / уже был |
+| `1` | не прошла проверка `verify` или тестовый запрос | да |
+| `2` | сигнатуры не найдены/неоднозначны, бэкап повреждён | **нет** |
+| `3` | бинарник запущен | нет |
+
+`patch` пишет только при однозначном совпадении. Если сигнатура найдена 0 раз,
+2+ раза или в смешанном состоянии (часть уже пропатчена) — запись отменяется,
+оригинал остаётся нетронутым.
+
+Проверить, что именно нашлось, не записывая:
+
+```bash
+./agy-region-fix --dry-run patch
+```
+
+### 10.3 Патч на месте, но CLI всё равно отказывает
+
+1. Убедитесь, что пропатчен тот файл, который запускается:
+
+   ```bash
+   which -a agy
+   ./agy-region-fix --path "$(which agy)" status
+   ```
+
+   В выводе должно быть `состояние: пропатчен` и `patched cli` (и `patched hub`,
+   если есть).
+
+2. Посмотрите, что говорит сервер, а не клиент:
+
+   ```bash
+   tail -60 ~/.gemini/antigravity-cli/log/cli-*.log | grep -Ei 'ineligible|eligib|PERMISSION_DENIED|FAILED_PRECONDITION|403|400'
+   ```
+
+   * `Account ineligible: ... not currently available in your location` —
+     это ответ `loadCodeAssist`; клиентский гейт снят, запрос уходит дальше.
+   * Если **после** этого появляется `403 PERMISSION_DENIED` или
+     `400 FAILED_PRECONDITION` на `streamGenerateContent` — ограничение уже
+     серверное. Патч его не обходит, и это не лечится клиентом.
+   * Если ошибок нет и приходит ответ модели — всё работает.
+
+3. Проверьте, не обновился ли бинарник между патчем и запуском:
+
+   ```bash
+   ./agy-region-fix verify; agy --version
+   ```
+
+   Автообновление перезаписывает файл. После каждого обновления — `patch`.
+
+4. Если `agy` запускается из другого места (обёртка, `.desktop`, IDE),
+   проверьте все копии:
+
+   ```bash
+   ./agy-region-fix --all status
+   ls -l ~/.local/bin/agy ~/.gemini/bin/agy
+   ```
+
+### 10.4 Авторизация, keyring, токены
+
+* Токен хранится в системном keyring. Если keyring заблокирован (GNOME
+  Keyring/oo7), `agy` не сможет его прочитать: разблокируйте связку ключей и
+  повторите запуск.
+* Повторный вход: запустите `agy` без `-p` и пройдите вход в браузере. Это
+  безопаснее, чем удалять файлы авторизации.
+* `~/.gemini/oauth_creds.json` может содержать просроченный `access_token` —
+  это нормально, клиент обновляет его по `refresh_token`. Не удаляйте файл без
+  необходимости.
+* Ни патчер, ни его логи не печатают токены. Если вы присылаете лог для
+  диагностики, убедитесь, что в нём нет заголовков `Authorization`.
+
+### 10.5 Сеть, DNS, прокси
+
+Патч не меняет сетевые настройки; если проблема сетевая, он не поможет:
+
+```bash
+env | grep -i proxy                 # прокси не должен быть обязательным
+getent hosts daily-cloudcode-pa.googleapis.com
+curl -sS -o /dev/null -w '%{http_code}\n' https://daily-cloudcode-pa.googleapis.com
+curl -sS -o /dev/null -w '%{http_code}\n' https://www.googleapis.com
+```
+
+* `000` или таймаут — DNS/файрвол/провайдер.
+* Долгие ответы (10+ секунд) часто из-за IPv6: сравните
+  `curl -4` и `curl -6`. При проблеме с IPv6 помогает приоритет IPv4 на уровне
+  приложения/сети, но это уже изменение системных настроек — делайте осознанно.
+* Корпоративный прокси/MITM ломает TLS: патч здесь ни при чём, и отключать
+  проверку сертификатов не нужно и не следует.
+
+### 10.6 macOS
+
+```bash
+# что видит система
+codesign -d --verbose=4 /Applications/Antigravity.app 2>&1 | head -20
+codesign --verify --deep --strict --verbose=2 /Applications/Antigravity.app
+spctl -a -vv /Applications/Antigravity.app
+xattr -l /Applications/Antigravity.app
+```
+
+* **`patch` отказался из-за Library Validation.** Главный бинарник подписан с
+  Hardened Runtime, ad-hoc подпись сломает загрузку вложенных библиотек.
+  Повторите с флагом (entitlement добавится только главному executable):
+
+  ```bash
+  ./agy-region-fix --app --macos-disable-library-validation patch
+  ```
+
+* **«Приложение повреждено» / не запускается.** Верните оригинал и подпись:
+
+  ```bash
+  ./agy-region-fix --app restore
+  ```
+
+  Затем при необходимости пропатчьте заново. Снапшот оригинальной подписи
+  лежит рядом: `<App>.app.agysignbak`.
+
+* **Нужна ручная подпись** (`--no-resign`):
+
+  ```bash
+  codesign --force --sign - --timestamp=none --preserve-metadata=identifier,entitlements,flags,runtime <файл>
+  codesign --force --deep --sign - --timestamp=none /Applications/Antigravity.app
+  codesign --verify --deep --strict /Applications/Antigravity.app
+  ```
+
+* **Gatekeeper/quarantine.** После правки снимите карантин:
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/Antigravity.app
+  ```
+
+  Первый запуск — правый клик → «Открыть».
+
+* **`absent` для arm64.** Сигнатура arm64 требует контекста `cbnz x1; cbz x0`.
+  Если его нет, патчер не пишет. Пришлите `status` и `uname -m`.
+
+* **Универсальный бинарник.** Патчатся оба слайса; в `status` будет
+  `universal(x64+arm64)`. Если один слайс не найден — будет `absent` только у
+  него, второй пропатчится.
+
+### 10.7 Приложение Antigravity и IDE
+
+* Пути: `~/.local/opt/antigravity-app/.../resources/bin/language_server`
+  (Linux), `/Applications/Antigravity.app/Contents/Resources/bin/language_server`
+  (macOS).
+* Пропатчить: `./agy-region-fix --app patch`; проверить:
+  `./agy-region-fix --app verify`.
+* `Error Loading Models: ... context deadline exceeded` — сеть, не патч
+  (см. 10.5). После исправления сети перезагрузите окно.
+* Экран «Welcome to Antigravity / Continue with Google» при рабочем `agy` —
+  не пропатчен `language_server` либо запущена старая копия приложения.
+* IDE использует `~/.gemini/bin/agy` как бэкенд; он входит в `--app`/`--all`.
+* Автообновление приложения и CLI возвращает оригиналы — повторите `patch`.
+
+### 10.8 Откат и восстановление
+
+```bash
+./agy-region-fix restore                  # последняя подходящая копия
+./agy-region-fix restore --version 1.5.14 # копия конкретной версии
+./agy-region-fix restore --from ~/.local/share/antigravity-region-fix/backups/agy-....orig
+./agy-region-fix backups                  # что вообще есть
+```
+
+`restore` проверяет, что копия не повреждена и сама не содержит патча; при
+несовпадении sha256 откажется писать.
+
+Если бэкапа нет (например, проект скопирован на другую машину): переустановите
+`agy` официальным установщиком — он вернёт оригинальный бинарник. Резервные
+копии хранятся локально и в репозиторий не попадают.
+
+Убрать саму утилиту, не трогая Antigravity:
+
+```bash
+make uninstall
+rm -rf ~/.local/share/antigravity-region-fix   # заодно удалит бэкапы
+```
+
+### 10.9 Что прислать, если нужна помощь
+
+Достаточно этого (без токенов и cookie):
+
+```bash
+./agy-region-fix status
+./agy-region-fix gates
+agy --version; uname -a
+sha256sum "$(which agy)"
+tail -50 ~/.gemini/antigravity-cli/log/cli-*.log
+```
+
+Для macOS добавьте `uname -m` и вывод `codesign -d --verbose=4` по бандлу.
+
+### 10.10 Чего патч не делает
+
+* Не выдаёт платные модели и не меняет тариф — это решает сервер.
+* Не обходит серверный отказ `400/403` по региону аккаунта.
+* Не «включает» Gemini Web и AI Studio: у них нет клиентского гейта, отказ
+  приходит с сервера.
+* Не отключает TLS, не подменяет DNS, не настраивает прокси, не трогает токены.
+
+## 11. Источники и совместимость
 
 * Сигнатуры гейтов и arm64-контекст (`cbnz x1; cbz x0`) сверены с
   [RendeRR/antigravity-patcher](https://github.com/RendeRR/antigravity-patcher)
