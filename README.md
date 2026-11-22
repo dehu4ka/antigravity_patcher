@@ -347,7 +347,7 @@ antigravity_patcher/
 ├── LICENSE                     # MIT
 ├── NOTICE                      # атрибуция upstream
 ├── README.md
-├── .github/workflows/tests.yml # CI: py_compile + тесты на 3.8/3.10/3.12
+├── ci/github-actions-tests.yml # готовый CI (включается вручную, см. шапку файла)
 └── tests/test_patcher.py       # 22 юнит-теста
 
 ~/.local/share/antigravity-region-fix/backups/
