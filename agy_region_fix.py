@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 TOOL = "antigravity-region-fix"
-TOOL_VERSION = "1.1.1"
+TOOL_VERSION = "1.2.0"
 MANIFEST_SCHEMA = 1
 
 # --------------------------------------------------------------------------
@@ -1518,6 +1518,124 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 0 if proc.returncode == 0 else proc.returncode
 
 
+def _settings_path(args: argparse.Namespace) -> Path:
+    explicit = getattr(args, "settings", None)
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+
+
+def list_models(path: Path, timeout: int = 60) -> List[Tuple[str, str]]:
+    """Возвращает [(id, display_name)] из `agy models`."""
+    try:
+        proc = subprocess.run(
+            [str(path), "models"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout, env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PatchError("не удалось получить список моделей: %s" % exc)
+    text = proc.stdout.decode("utf-8", "replace")
+    models: List[Tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Fetching"):
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            models.append((parts[0].strip(), parts[1].strip()))
+    if not models:
+        raise PatchError("список моделей пуст или формат вывода изменился")
+    return models
+
+
+def probe_model(path: Path, model_id: str, timeout: int) -> Tuple[bool, str]:
+    """Один настоящий запрос к модели. Успех = код возврата 0."""
+    try:
+        proc = subprocess.run(
+            [str(path), "--model", model_id, "-p", "Reply with exactly OK"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout, env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+        )
+    except subprocess.TimeoutExpired:
+        return False, "таймаут %d с" % timeout
+    except OSError as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, "OK"
+    text = proc.stdout.decode("utf-8", "replace")
+    m = re.search(r'"short_error":"(.*?)"', text)
+    detail = m.group(1) if m else (text.strip().splitlines()[-1] if text.strip() else "")
+    return False, detail[:180] or ("код %d" % proc.returncode)
+
+
+# Порядок предпочтения при выборе модели по умолчанию: сначала не-Gemini,
+# потому что Gemini-эндпоинт первым упирается в региональный отказ.
+MODEL_PREFERENCE = ("claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    targets = resolve(args)
+    if not targets:
+        err("agy не найден")
+        return 2
+    path = targets[0]
+    print(_c(str(path), "1"))
+
+    models = list_models(path)
+    print("проверяю %d моделей реальным запросом…" % len(models))
+    results: List[Tuple[str, str, bool, str]] = []
+    for model_id, name in models:
+        good, detail = probe_model(path, model_id, args.timeout)
+        results.append((model_id, name, good, detail))
+        print("  %s %-26s %-28s %s" % (
+            _c("OK  ", "32") if good else _c("FAIL", "31"), model_id, name, "" if good else detail))
+    working = [r for r in results if r[2]]
+    if not working:
+        err("ни одна модель не ответила: ограничение действует и на сервере.")
+        err("локальный патч в этом случае не поможет — нужен регион, который Google поддерживает.")
+        return 1
+
+    chosen = None
+    for preferred in MODEL_PREFERENCE:
+        for r in working:
+            if r[0] == preferred:
+                chosen = r
+                break
+        if chosen:
+            break
+    if chosen is None:
+        chosen = working[0]
+
+    ok("работают: %s" % ", ".join(r[0] for r in working))
+    print("модель по умолчанию: %s" % chosen[1])
+
+    if not args.fix_default:
+        print("\nчтобы записать её в настройки: %s --fix-default" % sys.argv[0])
+        return 0
+
+    settings_file = _settings_path(args)
+    try:
+        settings = json.loads(settings_file.read_text("utf-8")) if settings_file.is_file() else {}
+    except (OSError, ValueError) as exc:
+        err("не удалось прочитать %s: %s" % (settings_file, exc))
+        return 2
+    old = settings.get("model")
+    if old == chosen[1]:
+        ok("в настройках уже стоит %s" % old)
+        return 0
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    if settings_file.is_file():
+        backup = settings_file.with_suffix(settings_file.suffix + ".bak")
+        shutil.copy2(settings_file, backup)
+        ok("резервная копия настроек: %s" % backup)
+    settings["model"] = chosen[1]
+    mode = (settings_file.stat().st_mode & 0o777) if settings_file.exists() else 0o600
+    atomic_write(settings_file, (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), mode)
+    ok("модель по умолчанию: %s → %s" % (old or "не задана", chosen[1]))
+    return 0
+
+
 def resolve(args: argparse.Namespace) -> List[Path]:
     if getattr(args, "path", None):
         return [Path(p).expanduser() for p in args.path]
@@ -1584,6 +1702,11 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("test", help="реальный запрос к модели через agy -p")
     t.add_argument("--prompt", help="текст запроса")
     t.add_argument("--timeout", type=int, default=180, help="таймаут, секунды")
+    d = sub.add_parser("doctor", help="проверить модели и поставить рабочую по умолчанию")
+    d.add_argument("--timeout", type=int, default=120, help="таймаут одного запроса, секунды")
+    d.add_argument("--fix-default", action="store_true",
+                   help="записать рабочую модель в settings.json (с резервной копией)")
+    d.add_argument("--settings", metavar="FILE", help="путь к settings.json")
 
     return p
 
@@ -1600,6 +1723,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "prune": cmd_prune,
         "gates": cmd_gates,
         "test": cmd_test,
+        "doctor": cmd_doctor,
     }
     handler = handlers[args.command]
     if args.command in ("patch", "restore"):

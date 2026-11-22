@@ -140,12 +140,14 @@ cd ~/Проекты/antigravity-region-fix
 ./agy-region-fix patch       # применить (создаёт проверенный бэкап)
 ./agy-region-fix verify      # убедиться, что патч на месте
 ./agy-region-fix test        # реальный запрос: agy -p "Reply with exactly OK"
+./agy-region-fix doctor      # проверить каждую модель живым запросом
 ./agy-region-fix restore     # вернуть оригинальный бинарник
 ```
 
 Полезное:
 
 ```bash
+./agy-region-fix doctor      # какие модели отвечают (ничего не меняет)
 ./agy-region-fix --dry-run patch          # показать смещения и хэши, ничего не писать
 ./agy-region-fix --path /opt/agy patch    # явный путь
 ./agy-region-fix --all patch              # + бэкенды приложений (App и IDE)
@@ -406,7 +408,8 @@ tail -40 ~/.gemini/antigravity-cli/log/cli-*.log
 | «нет прав на запись» | файл принадлежит root | `sudo ./agy-region-fix patch` или исправьте владельца |
 | Патч применён, но снова ошибка региона | пропатчен не тот файл | `which agy` и `./agy-region-fix status`; сверьте путь |
 | После обновления CLI всё сломалось | автообновление вернуло оригинал | `./agy-region-fix verify` → `patch` |
-| `400 FAILED_PRECONDITION`, «User location is not supported for the API use» | **серверный** отказ | локальным патчем не решается |
+| `400 FAILED_PRECONDITION`, «User location is not supported for the API use» **только на Gemini** | сервер режет это семейство по IP, остальные работают | `./agy-region-fix doctor` покажет, что отвечает; модель по умолчанию не меняется |
+| `400 FAILED_PRECONDITION` на всех моделях | **серверный** отказ по IP/аккаунту | локальным патчем не решается |
 | `403 PERMISSION_DENIED` | **серверные** права/регион аккаунта | локальным патчем не решается |
 | `429` / quota exceeded | лимиты тарифа | подождать/сменить модель |
 | `context deadline exceeded` | сеть, DNS, IPv6 | см. 9.5 |
@@ -459,6 +462,10 @@ tail -40 ~/.gemini/antigravity-cli/log/cli-*.log
    * Если **после** этого появляется `403 PERMISSION_DENIED` или
      `400 FAILED_PRECONDITION` на `streamGenerateContent` — ограничение уже
      серверное. Патч его не обходит, и это не лечится клиентом.
+     Если `400` приходит только на Gemini, а Claude/GPT-OSS отвечают,
+     это блокировка конкретного семейства по IP: `./agy-region-fix doctor`
+     покажет, что работает. Модель по умолчанию при этом менять не нужно —
+     достаточно запускать нужную явно: `agy --model claude-sonnet-4-6 -p "..."`.
    * Если ошибок нет и приходит ответ модели — всё работает.
 
 3. Проверьте, не обновился ли бинарник между патчем и запуском:
